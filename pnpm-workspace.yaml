@@ -1,0 +1,7 @@
+onlyBuiltDependencies:
+    - '@sveltejs/kit'
+    - esbuild
+
+packages:
+    - 'playground'
+    - '.'

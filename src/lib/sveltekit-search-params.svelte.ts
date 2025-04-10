@@ -1,21 +1,30 @@
 import { browser, building } from '$app/environment';
-import { goto } from '$app/navigation';
-import { page as page_store } from '$app/stores';
+import { goto, pushState, replaceState } from '$app/navigation';
+import { page as page_state } from '$app/state';
 import type { Page } from '@sveltejs/kit';
-import { fromStore, readable, type Readable } from 'svelte/store';
-import type { EncodeAndDecodeOptions, NavigationOptions } from './types';
+import type {
+	EncodeAndDecodeOptions,
+	NavigationOptions,
+	NavigationType,
+} from './types';
 export type { EncodeAndDecodeOptions, NavigationOptions };
+
+type ResolvedNavigationType = Exclude<NavigationType, 'both'>;
+type ResolvedNavigationOptions<TNavigation extends ResolvedNavigationType> =
+	Omit<NavigationOptions<TNavigation>, 'navigationType'> & {
+		navigationType: TNavigation;
+	};
 
 // during building we fake the page store with an URL with no search params
 // as it should be during prerendering. This allow the application to still build
 // and the client side behavior is still persisted after the build
-let page: Readable<Pick<Page, 'url'>>;
+let page: Pick<Page, 'url'>;
 if (building) {
-	page = readable({
+	page = {
 		url: new URL('http://example.com'),
-	});
+	};
 } else {
-	page = page_store;
+	page = page_state;
 }
 
 function is_complex_equal<T>(
@@ -66,13 +75,12 @@ type Options<T> = {
 
 type SetTimeout = ReturnType<typeof setTimeout>;
 
-const batched_updates = new Set<(query: URLSearchParams) => void>();
+const batched_hard_updates = new Set<(query: URLSearchParams) => void>();
+const batched_soft_updates = new Set<(query: URLSearchParams) => void>();
 
 let batch_timeout: number;
 
 const debounced_timeouts = new Map<string, SetTimeout>();
-
-const page_state = fromStore(page);
 
 const DEFAULT_ENCODER_DECODER: EncodeAndDecodeOptions = {
 	encode: (value) => value.toString(),
@@ -81,12 +89,12 @@ const DEFAULT_ENCODER_DECODER: EncodeAndDecodeOptions = {
 
 const RAW = Symbol('raw');
 
-function do_navigate(
+function do_navigate<TNavigation extends ResolvedNavigationType>(
 	name: string,
 	value: unknown,
 	encodes: Map<string | symbol, EncodeAndDecodeOptions['encode']>,
 	overrides: Record<string | symbol, unknown>,
-	navigation_options: NavigationOptions,
+	navigation_options: ResolvedNavigationOptions<TNavigation>,
 ) {
 	// if we are on the server just return since we can't navigate
 	if (!browser) return;
@@ -96,6 +104,7 @@ function do_navigate(
 		debounceHistory = 0,
 		pushHistory = true,
 		sort = true,
+		navigationType,
 	} = navigation_options;
 	const hash = window.location.hash;
 	// we batch the changes to prevent a new change arriving before the navigation from "negating" this change
@@ -113,11 +122,18 @@ function do_navigate(
 			}
 		}
 	};
-	batched_updates.add(to_batch);
+	if (navigationType === 'hard') {
+		batched_hard_updates.add(to_batch);
+	} else {
+		batched_soft_updates.add(to_batch);
+	}
 	clearTimeout(batch_timeout);
 	const query = new URLSearchParams(window.location.search);
 	batch_timeout = setTimeout(async () => {
-		batched_updates.forEach((batched) => {
+		batched_hard_updates.forEach((batched) => {
+			batched(query);
+		});
+		batched_soft_updates.forEach((batched) => {
 			batched(query);
 		});
 		clearTimeout(debounced_timeouts.get(name));
@@ -126,10 +142,21 @@ function do_navigate(
 				if (sort) {
 					query.sort();
 				}
-				await goto(
-					`?${query}${hash}`,
-					pushHistory ? GOTO_OPTIONS_PUSH : GOTO_OPTIONS,
-				);
+				const url = `?${query}${hash}`;
+				if (batched_hard_updates.size > 0) {
+					// if there are any hard updates at all, we need to opt into a hard navigation,
+					// even though some of the updates might have been soft
+					await goto(
+						url,
+						pushHistory ? GOTO_OPTIONS_PUSH : GOTO_OPTIONS,
+					);
+				} else {
+					if (pushHistory) {
+						pushState(url, {});
+					} else {
+						replaceState(url, {});
+					}
+				}
 				// reset overrides here since navigation finished
 				overrides[name] = undefined;
 			}
@@ -143,7 +170,8 @@ function do_navigate(
 				);
 			}
 		}
-		batched_updates.clear();
+		batched_hard_updates.clear();
+		batched_soft_updates.clear();
 	});
 }
 
@@ -152,11 +180,11 @@ function do_navigate(
  * want to change the base parameter...this function is passed through the
  * recursive proxy so that we can invoke it when a nested property changes
  */
-function create_root_navigator(
+function create_root_navigator<TNavigation extends ResolvedNavigationType>(
 	root: object,
 	encodes: Map<string | symbol, EncodeAndDecodeOptions['encode']>,
 	overrides: Record<string | symbol, unknown>,
-	navigation_options: NavigationOptions,
+	navigation_options: ResolvedNavigationOptions<TNavigation>,
 ) {
 	return (_path: string[], key: string, to_set: unknown) => {
 		const path = [..._path];
@@ -186,6 +214,7 @@ function create_root_navigator(
  */
 function create_recursive_proxy<
 	T extends Record<string, EncodeAndDecodeOptions | boolean>,
+	TNavigation extends ResolvedNavigationType,
 >(
 	target: unknown,
 	cache: Partial<T>,
@@ -193,7 +222,7 @@ function create_recursive_proxy<
 	encodes: Map<string | symbol, EncodeAndDecodeOptions['encode']>,
 	overrides: Record<string | symbol, unknown>,
 	old_values: Map<string | symbol, Options<T>>,
-	navigation_options: NavigationOptions,
+	navigation_options: ResolvedNavigationOptions<TNavigation>,
 	path: string[] = [],
 	navigator?: ReturnType<typeof create_root_navigator>,
 ) {
@@ -240,7 +269,7 @@ function create_recursive_proxy<
 				const value =
 					cache[name as never] ??
 					(decodes.get(name) ?? DEFAULT_ENCODER_DECODER.decode)(
-						page_state.current.url.searchParams.get(name as never),
+						page.url.searchParams.get(name as never),
 					);
 				if (value != undefined && typeof value === 'object') {
 					return create_recursive_proxy(
@@ -293,14 +322,14 @@ function create_recursive_proxy<
 /**
  * function to check if we should show the default and eventually navigate to update the url
  */
-function should_default(
+function should_default<TNavigation extends ResolvedNavigationType>(
 	value: unknown,
 	key: string,
 	option: boolean | EncodeAndDecodeOptions,
 	show_defaults: boolean,
 	encodes: Map<string | symbol, EncodeAndDecodeOptions['encode']>,
 	overrides: Record<string | symbol, unknown>,
-	navigation_options: NavigationOptions,
+	navigation_options: ResolvedNavigationOptions<TNavigation>,
 ): option is EncodeAndDecodeOptions {
 	if (
 		value == undefined &&
@@ -321,16 +350,45 @@ function should_default(
 	return false;
 }
 
+type QueryParametersResult<
+	T extends Record<string, EncodeAndDecodeOptions | boolean>,
+	TNavigation extends NavigationType | undefined,
+> = TNavigation extends undefined
+	? {
+			soft: LooseAutocomplete<Options<T>>;
+			hard: LooseAutocomplete<Options<T>>;
+		}
+	: LooseAutocomplete<Options<T>>;
+
 export function queryParameters<
 	T extends Record<string, EncodeAndDecodeOptions | boolean>,
+	TNavigation extends NavigationType = 'hard',
 >(
 	options?: T,
-	navigation_options: NavigationOptions = {},
-): LooseAutocomplete<Options<T>> {
+	navigation_options: NavigationOptions<TNavigation> = {},
+): QueryParametersResult<T, TNavigation> {
+	if (navigation_options.navigationType === 'both') {
+		return {
+			hard: queryParameters<T, 'hard'>(options, {
+				...navigation_options,
+				navigationType: 'hard',
+			}),
+			soft: queryParameters<T, 'soft'>(options, {
+				...navigation_options,
+				navigationType: 'soft',
+			}),
+		} as QueryParametersResult<T, TNavigation>;
+	}
+
+	const defined_navigation_options = {
+		...navigation_options,
+		navigationType: navigation_options.navigationType ?? 'hard',
+	} as ResolvedNavigationOptions<ResolvedNavigationType>;
+
 	const { showDefaults: show_defaults = true } = navigation_options;
 	// keeps all the deriveds for every single property
 	const cache: Partial<T> = {};
-	// al the decode functions
+	// all the decode functions
 	const decodes: Map<string | symbol, EncodeAndDecodeOptions['decode']> =
 		new Map();
 	// all the encode functions
@@ -354,8 +412,7 @@ export function queryParameters<
 
 		const der = $derived.by(() => {
 			const value =
-				overrides[key] ??
-				decode(page_state.current.url.searchParams.get(key));
+				overrides[key] ?? decode(page.url.searchParams.get(key));
 			if (
 				!browser &&
 				should_default(
@@ -365,7 +422,7 @@ export function queryParameters<
 					show_defaults,
 					encodes,
 					overrides,
-					navigation_options,
+					defined_navigation_options,
 				)
 			) {
 				// return the default value on the server (we can't set the override in $effect.pre
@@ -401,7 +458,7 @@ export function queryParameters<
 					show_defaults,
 					encodes,
 					overrides,
-					navigation_options,
+					defined_navigation_options,
 				)
 			) {
 				overrides[key] = options[key].defaultValue;
@@ -422,6 +479,6 @@ export function queryParameters<
 		encodes,
 		overrides,
 		old_values,
-		navigation_options,
-	);
+		defined_navigation_options,
+	) as QueryParametersResult<T, TNavigation>;
 }

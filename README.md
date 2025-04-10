@@ -352,7 +352,7 @@ The `queryParameters` function accept a configuration object that contains the f
 
 ### debounceHistory
 
-The number of milliseconds to delay the writing of the history when the state changes. This is to avoid cluttering the history of the user especially when some parameter is bound to an input text (every keystroke would cause a new history entry). It defaults to 0. If set a new entry in the history will be added only after `debounceHistory` seconds of "inactivity".
+The number of milliseconds to delay the writing of the history when the state changes. This is to avoid cluttering the history of the user especially when some parameter is bound to an input text (every keystroke would cause a new history entry). It defaults to 0. If set a new entry in the history will be added only after `debounceHistory` milliseconds of "inactivity".
 
 ### pushHistory
 
@@ -772,7 +772,7 @@ The number of milliseconds to delay the writing of the history when the state ch
 
 ### pushHistory
 
-A boolean defining if the history have to be written at all. If set to false no new history entries will be written to the history stack (the URL will still update but the user will not be able to go back with the browser).
+When `true`, changes in the state will create new history entries. When `false`, they will replace the existing history entry.
 
 ### sort
 

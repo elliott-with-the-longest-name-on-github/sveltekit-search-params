@@ -401,7 +401,7 @@ test.describe('default values', () => {
 });
 
 test.describe('debounce history entry', () => {
-	test('debounce update the url only after 1000ms (set on the store)', async ({
+	test.only('debounce update the url only after 1000ms (set on the store)', async ({
 		page,
 	}) => {
 		await page.goto('/debounce?num=0');
