@@ -136,6 +136,7 @@ function do_navigate<TNavigation extends ResolvedNavigationType>(
 		batched_soft_updates.forEach((batched) => {
 			batched(query);
 		});
+		const had_hard_updates = batched_hard_updates.size > 0;
 		clearTimeout(debounced_timeouts.get(name));
 		if (browser) {
 			async function navigate() {
@@ -143,7 +144,7 @@ function do_navigate<TNavigation extends ResolvedNavigationType>(
 					query.sort();
 				}
 				const url = `?${query}${hash}`;
-				if (batched_hard_updates.size > 0) {
+				if (had_hard_updates) {
 					// if there are any hard updates at all, we need to opt into a hard navigation,
 					// even though some of the updates might have been soft
 					await goto(
